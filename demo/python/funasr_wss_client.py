@@ -11,8 +11,9 @@ from multiprocessing import Process
 # from funasr.fileio.datadir_writer import DatadirWriter
 
 import logging
-
-logging.basicConfig(level=logging.ERROR)
+import re
+logging.basicConfig(filename='284log.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# logging.basicConfig(level=logging.ERROR)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--host",
@@ -85,6 +86,241 @@ if args.output_dir is not None:
         
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
+
+# mapping: from Chinese num to Arabic num
+mapping = {
+    "洞": "0", "动": "0", "栋": "0", "幺": "1", "腰": "1", "两": "2", "梁": "2", "三": "3", "四": "4",
+    "五": "5", "六": "6", "拐": "7", "馆": "7", "八": "8", "勾": "9", "沟": "9", "九": "9"
+}
+
+def insert_punc(text, online_text):
+    # find positions of punctuation in text
+    punctuation_positions = [m.start() for m in re.finditer(r'[^\w\s]', text)]
+
+    temp = online_text
+    # insert punctuatiions of text into temp
+    for i, char in enumerate(text):
+        if i in punctuation_positions:
+            temp = temp[:i] + char + temp[i:]
+    return temp
+
+def replace_chinese_numbers(text):
+    # define Regular Expression
+    pattern = re.compile(r'[一二两三四五六七八九零百十千万0-9]+')
+
+    # find and replace the Chinese number with arabic
+    result = pattern.sub(lambda x: chinese_to_arabic(x.group()), text)
+    return result
+
+def chinese_to_arabic(s):
+    chinese_nums = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+    unit_map = {'十': 10, '百': 100, '千': 1000, '万': 10000}
+    result = 0; temp_result = 0; unit = 1; index = 0; length = len(s)
+
+    while index < length:
+        char = s[index]
+        if char not in chinese_nums and char not in unit_map and not(char.isdigit()):
+            index += 1
+        else:
+            if char == '十':
+                if (index+1) < length:
+                    if s[index+1] in chinese_nums:
+                        result = 10 + chinese_nums[s[index+1]]
+                    else:
+                        result = 10 + int(s[index+1])
+                else:
+                    result = 10
+                break
+            else:
+                if not char.isdigit():
+                    temp_result = chinese_nums[char]
+                else:
+                    temp_result = int(char)
+
+                if (index + 1 < length) and (s[index + 1] in unit_map):
+                    unit = unit_map[s[index + 1]]
+                    result += temp_result * unit
+                    index += 2
+                else:
+                    unit = max(int(unit/10), 1)
+                    result += temp_result * unit
+                    index += 1
+                    if index+1 == length and unit != 1: # 
+                        print(str(result)+s[index])
+                        return str(result)+s[index]
+
+    return str(result)
+
+def post_process(text):
+    # time-minutes
+    matches_time = re.finditer(r'(时)(.*?)(分)', text)
+    offset = 0
+    for match in matches_time:
+        temp = replace_chinese_numbers(match.group(2))
+        text = text[:match.start(2) + offset] + temp + text[match.end(2) + offset:]
+        offset += len(temp) - len(match.group(2))
+    
+    # time-hours
+    matches_hour = re.finditer(r'.{1,3}时', text)
+    if matches_hour:
+        for match in matches_hour:
+            temp = match.group()
+            print(temp)
+            temp = replace_chinese_numbers(temp)
+            text = text.replace(match.group(), temp)
+    
+    # orientation
+    matches_dir = re.finditer(r'航向(.{3})', text)
+    for match in matches_dir:
+        temp = text[match.start():match.end()]
+        for key, value in mapping.items():
+            temp = temp.replace(key, value)
+        text = text[:match.start()]+temp+text[match.end():]
+    
+    # degree 容易和高度冲突
+    matches_degree = re.finditer(r'.{3}度', text)#高度和角度
+    if matches_degree:
+        for match in matches_degree:
+            temp = match.group()
+            match_gao = re.search(r'高(.*)', temp)
+            if match_gao:
+                continue
+            else:
+                if temp[-2] != "速": # 度前面没有“速”
+                    temp = replace_chinese_numbers(temp)
+                    text = text.replace(match.group(), temp)
+    
+    # distance
+    matches_dis = list(re.finditer(r'.{2,5}公里', text))
+    new_text_parts = []
+    last_end = 0
+    if matches_dis:
+        for match in matches_dis:
+        #print("公里")
+            chinese_numbers = match.group()[:-2]  # 提取“公里”前的文本
+            match_du = re.search(r'度(.*)', chinese_numbers)
+            if match_du:
+                res_str = chinese_numbers[:match_du.start(1)]
+                chinese_numbers = match_du.group(1)
+                arabic_numbers = replace_chinese_numbers(chinese_numbers)
+                arabic_numbers = res_str+arabic_numbers
+            else:
+            #print(chinese_numbers)
+                arabic_numbers = replace_chinese_numbers(chinese_numbers)
+        #print(arabic_numbers)
+            new_text_parts.append(text[last_end:match.start()] + arabic_numbers + "公里")
+        #print(new_text_parts)
+            last_end = match.end()
+        new_text_parts.append(text[matches_dis[-1].end():])
+    else:
+        new_text_parts.append(text)
+    new_text = ''.join(new_text_parts)
+    
+    matches_vel = re.finditer(r'速度(.{2,5})', new_text)
+    vel_parts = []
+    last_end_vel = 0  # 重新计算速度部分的最后结束位置
+    #print("sudu")
+    if matches_vel:
+        for match in matches_vel:
+            temp = replace_chinese_numbers(match.group())
+            vel_parts.append(new_text[last_end_vel:match.start()] + temp)
+            #print(vel_parts)
+            last_end_vel = match.end()
+
+    vel_text = ''.join(vel_parts) + new_text[last_end_vel:]
+    
+    text = vel_text if vel_text else text
+    for key, value in mapping.items():
+        text = text.replace(key, value)
+    return str(text)
+    
+
+def post_process_online(text, online_text):
+    # time-minutes
+    matches_time = re.finditer(r'(时)(.*?)(分)', text)
+    offset = 0
+    for match in matches_time:
+        temp = replace_chinese_numbers(match.group(2))
+        text = text[:match.start(2) + offset] + temp + text[match.end(2) + offset:]
+        online_text = online_text[:match.start(2) + offset] + temp + online_text[match.end(2) + offset:]
+        offset += len(temp) - len(match.group(2))
+    #print(text)
+    
+    # time-hours
+    matches_hour = re.finditer(r'.{3}时', text)
+    if matches_hour:
+        # 从“零”到“二十四”
+        for match in matches_hour:
+            temp = text[match.start():match.end()]
+            temp = replace_chinese_numbers(temp)
+            text = text[:match.start()]+temp+text[match.end():]
+            online_text = online_text[:match.start()]+temp+online_text[match.end():]
+    #print(text)
+
+    # degree
+    matches_degree = re.finditer(r'.{3}度', text)#高度和角度
+    if matches_degree:
+        for match in matches_degree:
+            temp = match.group()
+            match_gao = re.search(r'高(.*)', temp)
+            if match_gao:
+                break
+            else:# print(temp)
+                if temp[-2] != "速": # 度前面没有“速”
+                    temp = replace_chinese_numbers(temp)
+                    # print(temp)
+                    text = text.replace(match.group(), temp)
+                    online_text = online_text[:match.start()]+temp+online_text[match.end():]
+    # print(online_text)
+    
+    # distance
+    matches_dis = list(re.finditer(r'.{2,5}公里', text))
+    new_text_parts = []
+    online_text_parts = []
+    last_end = 0
+    if matches_dis:
+        for match in matches_dis:
+        #print("公里")
+            chinese_numbers = match.group()[:-2]  # 提取“公里”前的文本
+            match_du = re.search(r'度(.*)', chinese_numbers)
+            if match_du:
+                res_str = chinese_numbers[:match_du.start(1)]
+                chinese_numbers = match_du.group(1)
+                arabic_numbers = replace_chinese_numbers(chinese_numbers)
+                arabic_numbers = res_str+arabic_numbers
+            else:
+            #print(chinese_numbers)
+                arabic_numbers = replace_chinese_numbers(chinese_numbers)
+        #print(arabic_numbers)
+            new_text_parts.append(text[last_end:match.start()] + arabic_numbers + "公里")
+            online_text_parts.append(online_text[last_end:match.start()] + arabic_numbers + "公里")
+        #print(new_text_parts)
+            last_end = match.end()
+        new_text_parts.append(text[matches_dis[-1].end():])
+        online_text_parts.append(online_text[matches_dis[-1].end():])
+    else:
+        new_text_parts.append(text)
+        online_text_parts.append(online_text)
+    new_text = ''.join(new_text_parts)
+    new_online_text = ''.join(online_text_parts)
+
+    # velocity
+    matches_vel = re.finditer(r'速度(.{2,5})', new_text)
+    online_parts = []
+    last_end_vel = 0  # 重新计算速度部分的最后结束位置
+    for match in matches_vel:
+        temp = replace_chinese_numbers(match.group())
+        online_parts.append(new_online_text[last_end_vel:match.start()] + temp)
+        last_end_vel = match.end() + 1 # 往后多移一位，不然会重复
+    online_vel_text = ''.join(online_parts) + new_online_text[last_end_vel:]
+    # print(online_vel_text)
+    
+    # print(online_text)
+    online_text = online_vel_text if online_vel_text else online_text
+    for key, value in mapping.items():
+        online_text = online_text.replace(key, value)
+    
+    return str(text), str(online_text)
 
 
 async def record_microphone():
@@ -241,6 +477,9 @@ async def message(id):
     text_print = ""
     text_print_2pass_online = ""
     text_print_2pass_offline = ""
+    text_online = ""
+    text_print_final = ""
+    logger = logging.getLogger(__name__)
     if args.output_dir is not None:
         ibest_writer = open(os.path.join(args.output_dir, "text.{}".format(id)), "a", encoding="utf-8")
     else:
@@ -282,19 +521,54 @@ async def message(id):
                 if meg["mode"] == "2pass-online":
                     text_print_2pass_online += "{}".format(text)
                     text_print = text_print_2pass_offline + text_print_2pass_online
+                    text_online += "{}".format(text)
+                    # os.system('clear')
+                    # print("\rONline-format_text" + ": " + "{}".format(text))
+                    # print("\rONline-text_online" + ": " + text_online)
+                    # print("\rONline-text_print_2pass_online" + ": " + text_print_2pass_online)
+                    # print("\rONline-text_print_2pass_offline" + ": " + text_print_2pass_offline)
+                    # print("\rONline-text_print" + ": " + text_print)
                 else:
                     text_print_2pass_online = ""
-                    text_print = text_print_2pass_offline + "{}".format(text)
-                    text_print_2pass_offline += "{}".format(text)
+                    # text_print = text_print_2pass_offline + "{}".format(text)
+                    temp_res = "{}".format(text)
+                    logger.info(f'format text: {temp_res}, text_online: {text_online}')
+                    result = insert_punc(temp_res, text_online)
+                    logger.info(f"insert_punc text: {result}")
+                    result = result + temp_res[len(result):]
+                    logger.info(f"alignment text: {result}")
+                    temp_res, result = post_process_online(temp_res, result)# 拿到了结果，要累加起来了，即，送给2pass_offline
+                    logger.info(f'after post_process_online: text = {temp_res}, result = {result}')
+                    # os.system('clear')
+                    # print("\rOFFline-format_text" + ": " + "{}".format(text))
+                    # print("\rOFFline-result" + ": " + result)
+                    # print("\rOFFline-text_online" + ": " + text_online)
+                    # print("\rtext length" + ": " + str(len("{}".format(text))))
+                    # print("\ronline length" + ": " + str(len(text_online)))
+                    # print("\rOFFline-text_print" + ": " + text_print)
+                    # text_print_2pass_offline += "{}".format(text) + " " #添加空格进行隔断，避免数字+编号，混在一起
+                    text_print_2pass_offline += result + " "
+                    text_print = text_print_2pass_offline.replace(" ", "")
+                    # print("\rOFFline-2pass_offline" + ": " + text_print_2pass_offline)
+                    # print("\rOFFline-2pass_online" + ": " + text_print_2pass_online)
+                    # text_post_process = post_process(text_print) #可以放这儿
+                    # text_print_final = text_post_process.replace(" ", "")
+                    text_online = "" # 每次offline之后清空online的数据，以便和下一组的offline对比
                 text_print = text_print[-args.words_max_print:]
+                #text_print = text_print_2pass_offline[-args.words_max_print:]
+                # text_post_process = post_process(text_print) #可以放这儿
+                #text_print_final = text_post_process.replace(" ", "")
                 os.system('clear')
                 print("\rpid" + str(id) + ": " + text_print)
+                # print("\rfinal" + str(id) + ": " + text_print_final)
                 offline_msg_done=True
+                
+                
 
     except Exception as e:
             print("Exception:", e)
-            #traceback.print_exc()
-            #await websocket.close()
+            traceback.print_exc() # 打开详细的追踪信息，异常发生时的堆栈跟踪
+            await websocket.close() # 发生异常时关闭websocket连接
 
 
 
